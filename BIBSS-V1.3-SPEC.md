@@ -11,6 +11,16 @@
 
 ---
 
+## Changelog v1.3.1 (amendment, 2026-10-27)
+
+Clarifications and conformance fixes. No change to inference behavior or to the CISM shape; `version` remains `"1.3"`.
+
+| ID | Section(s) | Severity | Change |
+|---|---|---|---|
+| C-016 | 2.1, 9.1, 9.3, 17.1 | **High** | Determinism contract scoped to exclude `generatedAt`. v1.3 required both byte-identical CISM output and a wall-clock `generatedAt` timestamp, which cannot both hold. `generatedAt` is now explicitly the sole non-deterministic field; every other field (and every adapter output that does not include it, e.g. JSON Schema) must be byte-identical. |
+| C-017 | 11.1 | **Medium** | `$id` hash made precise: lowercase hex SHA-256 of the first 1024 bytes of the original input (UTF-8 encoding for string input; raw bytes for binary input), computed synchronously. |
+| C-018 | 12, 13 | **Minor** | `infer()` accepts `string \| ArrayBuffer \| ArrayBufferView` (e.g. `Uint8Array`); binary input is decoded as UTF-8. `maxSizeWarning` is compared against the input's UTF-8 byte length, not its UTF-16 string length. |
+
 ## Changelog from v1.2
 
 | ID | Section(s) | Severity | Change |
@@ -40,6 +50,9 @@
 | v1.3 | C-013 | 9.1 | High | Added `typeDistribution` to SchemaNode |
 | v1.3 | C-014 | 20 | Medium | Downstream integration architecture documentation |
 | v1.3 | C-015 | 7.1.2 | Clarification | Clean-input assumption for domain pre-processing |
+| v1.3.1 | C-016 | 2.1, 9.1, 9.3, 17.1 | High | Determinism contract excludes `generatedAt` |
+| v1.3.1 | C-017 | 11.1 | Medium | `$id` = SHA-256 of first 1024 input bytes |
+| v1.3.1 | C-018 | 12, 13 | Minor | Typed-array input; size warning in UTF-8 bytes |
 
 ---
 
@@ -57,7 +70,7 @@ All processing occurs locally in the browser. No data is transmitted over the ne
 
 ### 2.1 Determinism Contract
 
-Given identical input bytes and an identical `InferConfig` object, BIBSS must produce byte-identical CISM output across all invocations, on all conformant JavaScript runtimes. There are no random operations anywhere in the inference pipeline. Any operation that would introduce non-determinism (randomized sampling, `Date.now()` seeding, `Math.random()`) is prohibited.
+Given identical input bytes and an identical `InferConfig` object, BIBSS must produce byte-identical CISM output across all invocations, on all conformant JavaScript runtimes, with the sole exception of the `generatedAt` timestamp (C-016). There are no random operations anywhere in the inference pipeline. Any operation that would introduce non-determinism (randomized sampling, `Date.now()` seeding, `Math.random()`) is prohibited. The clock is read only to populate `generatedAt`; it must never influence any other field. Consumers that hash or diff CISM output must exclude `generatedAt`.
 
 ### 2.2 Edge-Canonical Compliance
 
@@ -498,7 +511,7 @@ The CISM is the sole internal representation. All outputs are projections of thi
 ```typescript
 interface CISMRoot {
   version: "1.3"
-  generatedAt: string          // ISO 8601 timestamp of generation
+  generatedAt: string          // ISO 8601 timestamp of generation (excluded from the determinism contract, §2.1)
   config: InferConfig          // The configuration used to produce this CISM
   root: SchemaNode
   nodeIndex: Map<string, SchemaNode>  // All nodes indexed by ID (omitted from serialization)
@@ -585,7 +598,7 @@ These are distinct strings. No collision is possible for any valid JSON key, bec
 
 The CISM is serializable to JSON. The `nodeIndex` map is omitted from serialization (it is reconstructable from the tree). The serialized form includes `version`, `generatedAt`, `config`, and `root`.
 
-Serialization must be deterministic: property keys are emitted in declaration order as defined in Section 9.1, arrays preserve insertion order, and no non-deterministic metadata (e.g., runtime memory addresses) may appear. Within `typeDistribution` objects, keys are emitted in lattice order: `null`, `boolean`, `integer`, `number`, `string`. Only keys with non-zero counts are included.
+Serialization must be deterministic (apart from the value of `generatedAt`, §2.1): property keys are emitted in declaration order as defined in Section 9.1, arrays preserve insertion order, and no non-deterministic metadata (e.g., runtime memory addresses) may appear. Within `typeDistribution` objects, keys are emitted in lattice order: `null`, `boolean`, `integer`, `number`, `string`. Only keys with non-zero counts are included.
 
 ### 9.4 Type Distribution
 
@@ -705,6 +718,8 @@ The emitted schema includes:
 }
 ```
 
+The `$id` hash is the lowercase hexadecimal SHA-256 digest of the first 1024 bytes of the original input — the UTF-8 encoding for string input, the raw bytes for `ArrayBuffer`/`ArrayBufferView` input (C-017). Inputs shorter than 1024 bytes are hashed in full. The digest is computed synchronously so `infer()` remains synchronous.
+
 ### 11.2 Raw CISM Adapter
 
 Emits the CISM as a JSON document, as defined in Section 9.3. This is the identity adapter. The `typeDistribution` field is included in the raw CISM output.
@@ -737,7 +752,7 @@ interface BIBSS {
    * Infer schema from raw input.
    * Returns the CISM and a set of diagnostics.
    */
-  infer(input: string | ArrayBuffer, config?: Partial<InferConfig>): InferResult
+  infer(input: string | ArrayBuffer | ArrayBufferView, config?: Partial<InferConfig>): InferResult  // binary input decoded as UTF-8 (C-018)
 
   /**
    * Project the CISM through a named output adapter.
@@ -799,7 +814,7 @@ interface InferConfig {
   /** Override format detection. Default: undefined (auto-detect). */
   format?: "csv" | "json"
 
-  /** Maximum file size in bytes before warning. Default: 10485760 (10MB) */
+  /** Maximum input size in UTF-8 bytes before warning (C-018). Default: 10485760 (10MB) */
   maxSizeWarning: number
 }
 ```
@@ -889,10 +904,11 @@ These are targets, not guarantees. Actual performance depends on the runtime.
 For every test case, the following must hold:
 
 ```
-JSON.stringify(infer(input, config).cism) === JSON.stringify(infer(input, config).cism)
+const stable = (cism) => JSON.stringify({ ...cism, generatedAt: undefined })
+stable(infer(input, config).cism) === stable(infer(input, config).cism)
 ```
 
-Serialized CISM output must be byte-identical across invocations. This includes `typeDistribution` maps, which must serialize in lattice key order.
+Serialized CISM output must be byte-identical across invocations, excluding `generatedAt` (C-016). Adapter outputs that do not carry `generatedAt` (e.g. JSON Schema) must be fully byte-identical. This includes `typeDistribution` maps, which must serialize in lattice key order.
 
 ### 17.2 Required Test Cases
 

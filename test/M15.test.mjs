@@ -153,6 +153,65 @@ assert(adapterNames.includes('cism'),       '§12: adapters has cism (M14)');
   assert(d.level === 'warning',                        '§14 BIBSS-001: level = warning');
 }
 
+// ── §12.1 BIBSS-001: threshold counts UTF-8 bytes, not UTF-16 code units ──────
+{
+  const input = '{"s":"' + 'é'.repeat(10) + '"}'; // 18 code units, 28 UTF-8 bytes
+  const under = BIBSS.infer(input, { maxSizeWarning: 20 });
+  assert(under.diagnostics.some(d => d.code === 'BIBSS-001'), '§12.1 BIBSS-001: multi-byte chars counted as bytes');
+  const d = under.diagnostics.find(d => d.code === 'BIBSS-001');
+  assert(d.context.byteCount === 28, '§12.1 BIBSS-001: context.byteCount is UTF-8 length');
+  const fits = BIBSS.infer(input, { maxSizeWarning: 28 });
+  assert(!fits.diagnostics.some(d => d.code === 'BIBSS-001'), '§12.1 BIBSS-001: exactly-at-limit does not warn');
+}
+
+// ── §12: binary input — ArrayBuffer and typed-array views ────────────────────
+{
+  const text = '[{"a":1},{"a":2}]';
+  const fromString = BIBSS.infer(text).cism;
+  const u8 = new TextEncoder().encode(text);
+  const fromU8 = BIBSS.infer(u8).cism;
+  const fromBuf = BIBSS.infer(u8.buffer.slice(0)).cism;
+  // Subarray view with a non-zero offset into a larger buffer.
+  const padded = new Uint8Array(u8.length + 4);
+  padded.set(u8, 2);
+  const fromView = BIBSS.infer(padded.subarray(2, 2 + u8.length)).cism;
+  for (const [label, c] of [['Uint8Array', fromU8], ['ArrayBuffer', fromBuf], ['offset view', fromView]]) {
+    assert(c !== null, `§12 binary ${label}: cism non-null`);
+    assert(JSON.stringify(c.root) === JSON.stringify(fromString.root), `§12 binary ${label}: root matches string input`);
+    assert(c.inputHash === fromString.inputHash, `§12 binary ${label}: inputHash matches string input`);
+  }
+}
+
+// ── §11.1: $id is urn:bibss:inferred:<sha256 of first 1024 input bytes> ───────
+{
+  const r = BIBSS.infer('abc,def\n1,2');
+  assert(/^[0-9a-f]{64}$/.test(r.cism.inputHash), '§11.1 $id: inputHash is 64 hex chars');
+  const schema = BIBSS.project(r.cism, 'jsonschema');
+  assert(schema.$id === `urn:bibss:inferred:${r.cism.inputHash}`, '§11.1 $id: uses inputHash');
+  const other = BIBSS.infer('abc,def\n1,3');
+  assert(other.cism.inputHash !== r.cism.inputHash, '§11.1 $id: different input → different hash');
+  // Only the first 1024 bytes are hashed.
+  const head = 'x\n' + '1\n'.repeat(511); // exactly 1024 bytes
+  const a = BIBSS.infer(head + '2\n').cism.inputHash;
+  const b = BIBSS.infer(head + '3\n').cism.inputHash;
+  assert(a === b, '§11.1 $id: bytes beyond 1024 do not affect hash');
+}
+
+// ── §17.1: determinism — serialized CISM identical apart from generatedAt ─────
+{
+  const strip = (c) => JSON.stringify({ ...c, generatedAt: undefined });
+  for (const input of ['[{"a":1,"b":[1,"x",null]},{"a":null}]', 'h1,h2\nTRUE,1.5\nfalse,']) {
+    const a = BIBSS.infer(input).cism;
+    const b = BIBSS.infer(input).cism;
+    assert(strip(a) === strip(b), '§17.1 determinism: CISM byte-identical excluding generatedAt');
+    const pa = { ...BIBSS.project(a, 'cism'), generatedAt: undefined };
+    const pb = { ...BIBSS.project(b, 'cism'), generatedAt: undefined };
+    assert(JSON.stringify(pa) === JSON.stringify(pb), '§17.1 determinism: cism adapter output identical');
+    assert(JSON.stringify(BIBSS.project(a, 'jsonschema')) === JSON.stringify(BIBSS.project(b, 'jsonschema')),
+      '§17.1 determinism: jsonschema output fully identical');
+  }
+}
+
 // ── §14: exception-free contract ─────────────────────────────────────────────
 {
   let threw = false;

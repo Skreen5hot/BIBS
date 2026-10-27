@@ -7,18 +7,33 @@ import { inferSchema } from './inference-engine.mjs';
 import { createAdapterRegistry } from './adapter-registry.mjs';
 import { toJsonSchema } from './adapter-jsonschema.mjs';
 import { toCismRaw } from './adapter-cism-raw.mjs';
+import { sha256Hex } from './sha256.mjs';
+
+// §11.1: $id hashes the first 1024 bytes of the original input.
+const HASH_PREFIX_BYTES = 1024;
 
 const adapters = createAdapterRegistry();
 adapters.register('jsonschema', toJsonSchema);
 adapters.register('cism', toCismRaw);
 
+// Returns the input as both text and original bytes. Binary input (ArrayBuffer or any
+// typed-array view, e.g. Uint8Array) is decoded as UTF-8; string input is encoded to UTF-8
+// so byte counts and hashes reflect bytes, not UTF-16 code units.
+function toTextAndBytes(input) {
+  if (input instanceof ArrayBuffer) {
+    return { text: new TextDecoder().decode(input), bytes: new Uint8Array(input) };
+  }
+  if (ArrayBuffer.isView(input)) {
+    const bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    return { text: new TextDecoder().decode(bytes), bytes };
+  }
+  return { text: input, bytes: typeof input === 'string' ? new TextEncoder().encode(input) : null };
+}
+
 function infer(input, config) {
   const diagnostics = [];
   try {
-    let rawInput = input;
-    if (typeof ArrayBuffer !== 'undefined' && input instanceof ArrayBuffer) {
-      rawInput = new TextDecoder().decode(input);
-    }
+    const { text: rawInput, bytes } = toTextAndBytes(input);
 
     const mergedConfig = { ...DEFAULT_CONFIG, ...(config || {}) };
 
@@ -29,7 +44,7 @@ function infer(input, config) {
 
     const format = detectFormat(rawInput, mergedConfig.format);
 
-    const byteCount = typeof rawInput === 'string' ? rawInput.length : rawInput.byteLength;
+    const byteCount = bytes.length;
     if (byteCount > mergedConfig.maxSizeWarning) {
       diagnostics.push({
         level: 'warning',
@@ -85,7 +100,7 @@ function infer(input, config) {
       sampling: samplingInfo,
       root: rootNode,
       inputSource,
-      inputHash: '',
+      inputHash: sha256Hex(bytes.subarray(0, HASH_PREFIX_BYTES)),
     };
 
     return { cism, diagnostics };
